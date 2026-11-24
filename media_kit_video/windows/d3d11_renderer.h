@@ -28,12 +28,22 @@ class D3D11Renderer {
     std::lock_guard<std::mutex> lock(surfaces_mutex_);
     return render_target_texture_.Get();
   }
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_texture() const {
+    std::lock_guard<std::mutex> lock(surfaces_mutex_);
+    return shared_texture_;
+  }
   HANDLE shared_handle() const {
     std::lock_guard<std::mutex> lock(surfaces_mutex_);
     return shared_handle_;
   }
-  int32_t width() const { return width_; }
-  int32_t height() const { return height_; }
+  int32_t width() const {
+    std::lock_guard<std::mutex> lock(surfaces_mutex_);
+    return width_;
+  }
+  int32_t height() const {
+    std::lock_guard<std::mutex> lock(surfaces_mutex_);
+    return height_;
+  }
 
   bool SetSize(int32_t width, int32_t height);
   bool ProducerAcquire();
@@ -41,8 +51,8 @@ class D3D11Renderer {
 
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
-  bool CreateSurfaces();
-  void ReleaseSurfaces();
+  bool CreateSurfacesLocked();
+  void ReleaseSurfacesLocked();
 
   int32_t width_ = 1;
   int32_t height_ = 1;

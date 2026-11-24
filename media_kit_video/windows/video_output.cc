@@ -29,7 +29,8 @@ VideoOutput::VideoOutput(int64_t handle,
       configuration_(configuration),
       registrar_(registrar),
       thread_pool_ref_(thread_pool_ref) {
-  // The constructor must be invoked through the thread pool.
+  // NOTE: The constructor must be invoked from an external/detached thread,
+  // NEVER from ThreadPool's own worker thread, to prevent self-deadlock on .wait().
   auto future = thread_pool_ref_->Post([&]() {
     mpv_set_option_string(handle_, "video-sync", "audio");
     mpv_set_option_string(handle_, "video-timing-offset", "0");
@@ -39,9 +40,10 @@ VideoOutput::VideoOutput(int64_t handle,
 
     if (configuration.enable_hardware_acceleration) {
       try {
-        IDXGIAdapter* flutter_adapter = nullptr;
+        Microsoft::WRL::ComPtr<IDXGIAdapter> flutter_adapter;
         if (auto* view = registrar_->GetView()) {
-          flutter_adapter = view->GetGraphicsAdapter();
+          // FlutterDesktopViewGetGraphicsAdapter: caller must release the adapter.
+          flutter_adapter.Attach(view->GetGraphicsAdapter());
         }
         if (!flutter_adapter) {
           std::cout << "media_kit: VideoOutput: View returned null graphics adapter. Default adapter will be used."
@@ -50,7 +52,7 @@ VideoOutput::VideoOutput(int64_t handle,
         d3d11_renderer_ = std::make_unique<D3D11Renderer>(
             static_cast<int32_t>(width_.value_or(1)),
             static_cast<int32_t>(height_.value_or(1)),
-            flutter_adapter);
+            flutter_adapter.Get());
 
         // Initialize mpv with the D3D11 device. The render target is supplied
         // per frame through MPV_RENDER_PARAM_D3D11_FBO in Render().
@@ -142,8 +144,6 @@ VideoOutput::~VideoOutput() {
           auto future = thread_pool_ref_->Post([this, id = texture_id, &promise]() {
             std::cout << "media_kit: VideoOutput: Free Texture: " << id
                       << std::endl;
-            std::cout << "VideoOutput::~VideoOutput: "
-                      << reinterpret_cast<int64_t>(handle_) << std::endl;
             std::lock_guard<std::mutex> lock(textures_mutex_);
             texture_variants_.clear();
             // H/W
@@ -202,24 +202,41 @@ void VideoOutput::Render() {
     }
     // S/W
     if (pixel_buffer_ != nullptr) {
-      int32_t size[]{
-          static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->width),
-          static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->height),
-      };
-      auto pitch = 4 * size[0];
-      mpv_render_param params[]{
-          {MPV_RENDER_PARAM_SW_SIZE, size},
-          {MPV_RENDER_PARAM_SW_FORMAT, "rgb0"},
-          {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
-          {MPV_RENDER_PARAM_SW_POINTER, pixel_buffer_.get()},
-          {MPV_RENDER_PARAM_INVALID, nullptr},
-      };
-      mpv_render_context_render(render_context_, params);
-      try {
-        // Notify Flutter that a new frame is available.
-        registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-      } catch (...) {
-        // Prevent any redundant exceptions if the texture is unregistered etc.
+      int32_t width = 0;
+      int32_t height = 0;
+      {
+        std::lock_guard<std::mutex> lock(textures_mutex_);
+        auto it = pixel_buffer_textures_.find(texture_id_);
+        if (it != pixel_buffer_textures_.end() && it->second != nullptr) {
+          width = static_cast<int32_t>(it->second->width);
+          height = static_cast<int32_t>(it->second->height);
+        }
+      }
+      if (width > 0 && height > 0) {
+        int32_t size[]{width, height};
+        auto pitch = 4 * size[0];
+        mpv_render_param params[]{
+            {MPV_RENDER_PARAM_SW_SIZE, size},
+            {MPV_RENDER_PARAM_SW_FORMAT, "rgb0"},
+            {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
+            {MPV_RENDER_PARAM_SW_POINTER, pixel_buffer_.get()},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        mpv_render_context_render(render_context_, params);
+        try {
+          // Notify Flutter that a new frame is available.
+          registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+        } catch (...) {
+          // Prevent any redundant exceptions if the texture is unregistered etc.
+        }
+      } else {
+        // Contractually notify mpv to advance/skip the frame if buffer is not ready.
+        int skip = 1;
+        mpv_render_param params[]{
+            {MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        mpv_render_context_render(render_context_, params);
       }
     }
   }
@@ -280,15 +297,11 @@ void VideoOutput::CheckAndResize() {
   if (pixel_buffer_ != nullptr) {
     std::lock_guard<std::mutex> lock(textures_mutex_);
     auto it = pixel_buffer_textures_.find(texture_id_);
-    if (texture_id_ && it != pixel_buffer_textures_.end()) {
+    if (texture_id_ && it != pixel_buffer_textures_.end() && it->second != nullptr) {
       current_width = it->second->width;
       current_height = it->second->height;
     }
   }
-  // Currently rendered video output dimensions.
-  // Either H/W or S/W rendered.
-  assert(current_width > 0);
-  assert(current_height > 0);
   if (required_width == current_width && required_height == current_height) {
     // No creation of new texture required.
     return;
@@ -297,14 +310,15 @@ void VideoOutput::CheckAndResize() {
 }
 
 void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
-  std::cout << required_width << " " << required_height << std::endl;
   // Unregister previously registered texture & delete underlying objects.
   if (texture_id_) {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> old_surface = nullptr;
+    if (d3d11_renderer_ != nullptr) {
+      old_surface = d3d11_renderer_->shared_texture();
+    }
     registrar_->texture_registrar()->UnregisterTexture(
-        texture_id_, [alive = alive_, this, id = texture_id_]() {
+        texture_id_, [alive = alive_, this, id = texture_id_, old_surface = std::move(old_surface)]() {
           if (!*alive) return;
-          std::cout << "media_kit: VideoOutput: Free Texture: " << id
-                    << std::endl;
           std::lock_guard<std::mutex> lock(textures_mutex_);
           if (destroyed_) {
             return;
@@ -355,8 +369,6 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
       std::lock_guard<std::mutex> lock(textures_mutex_);
       texture_id_ =
           registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-      std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
-                << std::endl;
 
       textures_.emplace(texture_id_, std::move(texture));
       texture_variants_.emplace(texture_id_, std::move(texture_variant));
@@ -385,8 +397,6 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
       std::lock_guard<std::mutex> lock(textures_mutex_);
       texture_id_ =
           registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-      std::cout << "media_kit: VideoOutput: Create Texture: " << texture_id_
-                << std::endl;
 
       pixel_buffer_textures_.emplace(texture_id_, std::move(pixel_buffer_texture));
       texture_variants_.emplace(texture_id_, std::move(texture_variant));
@@ -406,31 +416,31 @@ int64_t VideoOutput::GetVideoWidth() {
   int64_t width = 0;
   int64_t height = 0;
 
-  mpv_node params;
-  mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
+  mpv_node params = {};
+  if (mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params) >= 0) {
+    int64_t dw = 0, dh = 0, rotate = 0;
+    if (params.format == MPV_FORMAT_NODE_MAP) {
+      for (int32_t i = 0; i < params.u.list->num; i++) {
+        char* key = params.u.list->keys[i];
+        auto value = params.u.list->values[i];
+        if (value.format == MPV_FORMAT_INT64) {
+          if (strcmp(key, "dw") == 0) {
+            dw = value.u.int64;
+          }
+          if (strcmp(key, "dh") == 0) {
+            dh = value.u.int64;
+          }
+          if (strcmp(key, "rotate") == 0) {
+            rotate = value.u.int64;
+          }
         }
       }
+      mpv_free_node_contents(&params);
     }
-    mpv_free_node_contents(&params);
-  }
 
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+    width = rotate == 0 || rotate == 180 ? dw : dh;
+    height = rotate == 0 || rotate == 180 ? dh : dw;
+  }
 
   if (pixel_buffer_ != nullptr) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &
@@ -455,31 +465,31 @@ int64_t VideoOutput::GetVideoHeight() {
   int64_t width = 0;
   int64_t height = 0;
 
-  mpv_node params;
-  mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params);
-
-  int64_t dw = 0, dh = 0, rotate = 0;
-  if (params.format == MPV_FORMAT_NODE_MAP) {
-    for (int32_t i = 0; i < params.u.list->num; i++) {
-      char* key = params.u.list->keys[i];
-      auto value = params.u.list->values[i];
-      if (value.format == MPV_FORMAT_INT64) {
-        if (strcmp(key, "dw") == 0) {
-          dw = value.u.int64;
-        }
-        if (strcmp(key, "dh") == 0) {
-          dh = value.u.int64;
-        }
-        if (strcmp(key, "rotate") == 0) {
-          rotate = value.u.int64;
+  mpv_node params = {};
+  if (mpv_get_property(handle_, "video-out-params", MPV_FORMAT_NODE, &params) >= 0) {
+    int64_t dw = 0, dh = 0, rotate = 0;
+    if (params.format == MPV_FORMAT_NODE_MAP) {
+      for (int32_t i = 0; i < params.u.list->num; i++) {
+        char* key = params.u.list->keys[i];
+        auto value = params.u.list->values[i];
+        if (value.format == MPV_FORMAT_INT64) {
+          if (strcmp(key, "dw") == 0) {
+            dw = value.u.int64;
+          }
+          if (strcmp(key, "dh") == 0) {
+            dh = value.u.int64;
+          }
+          if (strcmp(key, "rotate") == 0) {
+            rotate = value.u.int64;
+          }
         }
       }
+      mpv_free_node_contents(&params);
     }
-    mpv_free_node_contents(&params);
-  }
 
-  width = rotate == 0 || rotate == 180 ? dw : dh;
-  height = rotate == 0 || rotate == 180 ? dh : dw;
+    width = rotate == 0 || rotate == 180 ? dw : dh;
+    height = rotate == 0 || rotate == 180 ? dh : dw;
+  }
 
   if (pixel_buffer_ != nullptr) {
     // Make sure |width| & |height| fit between |SW_RENDERING_MAX_WIDTH| &

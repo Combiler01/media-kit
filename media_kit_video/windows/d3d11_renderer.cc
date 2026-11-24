@@ -21,13 +21,17 @@ D3D11Renderer::D3D11Renderer(int32_t width, int32_t height,
   if (!CreateD3D11Device(flutter_adapter)) {
     throw std::runtime_error("Unable to create Direct3D 11 device.");
   }
-  if (!CreateSurfaces()) {
+  std::lock_guard<std::mutex> lock(surfaces_mutex_);
+  if (!CreateSurfacesLocked()) {
     throw std::runtime_error("Unable to create Direct3D 11 surfaces.");
   }
 }
 
 D3D11Renderer::~D3D11Renderer() {
-  ReleaseSurfaces();
+  {
+    std::lock_guard<std::mutex> lock(surfaces_mutex_);
+    ReleaseSurfacesLocked();
+  }
   d3d_11_device_context_.Reset();
   d3d_11_device_.Reset();
 }
@@ -41,11 +45,8 @@ bool D3D11Renderer::CreateD3D11Device(IDXGIAdapter* flutter_adapter) {
       D3D_FEATURE_LEVEL_9_3,
   };
 
-  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
-  if (flutter_adapter) {
-    // Take ownership of caller's reference without an extra AddRef.
-    adapter.Attach(flutter_adapter);
-  }
+  // Safe reference handling: AddRef via ComPtr assignment
+  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter = flutter_adapter;
 
   D3D_DRIVER_TYPE driver_type =
       adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
@@ -77,9 +78,7 @@ bool D3D11Renderer::CreateD3D11Device(IDXGIAdapter* flutter_adapter) {
   return true;
 }
 
-bool D3D11Renderer::CreateSurfaces() {
-  std::lock_guard<std::mutex> lock(surfaces_mutex_);
-
+bool D3D11Renderer::CreateSurfacesLocked() {
   D3D11_TEXTURE2D_DESC desc = {};
   desc.Width = static_cast<UINT>(width_);
   desc.Height = static_cast<UINT>(height_);
@@ -98,7 +97,7 @@ bool D3D11Renderer::CreateSurfaces() {
       d3d_11_device_->CreateTexture2D(&desc, nullptr, &render_target_texture_);
   if (FAILED(hr)) {
     std::cout << "media_kit: D3D11Renderer: CreateTexture2D (render target) failed: 0x"
-              << std::hex << hr << std::dec << std::endl;
+              << std::hex << hr << std::dec << ")" << std::endl;
     return false;
   }
 
@@ -107,7 +106,7 @@ bool D3D11Renderer::CreateSurfaces() {
   hr = d3d_11_device_->CreateTexture2D(&desc, nullptr, &shared_texture_);
   if (FAILED(hr)) {
     std::cout << "media_kit: D3D11Renderer: CreateTexture2D (shared) failed: 0x"
-              << std::hex << hr << std::dec << std::endl;
+              << std::hex << hr << std::dec << ")" << std::endl;
     return false;
   }
 
@@ -116,14 +115,14 @@ bool D3D11Renderer::CreateSurfaces() {
   hr = shared_texture_.As(&resource);
   if (FAILED(hr)) {
     std::cout << "media_kit: D3D11Renderer: As<IDXGIResource> failed: 0x"
-              << std::hex << hr << std::dec << std::endl;
+              << std::hex << hr << std::dec << ")" << std::endl;
     return false;
   }
 
   hr = resource->GetSharedHandle(&shared_handle_);
   if (FAILED(hr)) {
     std::cout << "media_kit: D3D11Renderer: GetSharedHandle failed: 0x"
-              << std::hex << hr << std::dec << std::endl;
+              << std::hex << hr << std::dec << ")" << std::endl;
     return false;
   }
 
@@ -146,21 +145,21 @@ bool D3D11Renderer::CreateSurfaces() {
   return true;
 }
 
-void D3D11Renderer::ReleaseSurfaces() {
-  std::lock_guard<std::mutex> lock(surfaces_mutex_);
+void D3D11Renderer::ReleaseSurfacesLocked() {
   render_target_texture_.Reset();
   shared_texture_.Reset();
   shared_handle_ = nullptr;
 }
 
 bool D3D11Renderer::SetSize(int32_t width, int32_t height) {
+  std::lock_guard<std::mutex> lock(surfaces_mutex_);
   if (width == width_ && height == height_ && render_target_texture_ && shared_texture_) {
     return true;
   }
   width_ = (width > 0) ? width : 1;
   height_ = (height > 0) ? height : 1;
-  ReleaseSurfaces();
-  return CreateSurfaces();
+  ReleaseSurfacesLocked();
+  return CreateSurfacesLocked();
 }
 
 bool D3D11Renderer::ProducerAcquire() {
