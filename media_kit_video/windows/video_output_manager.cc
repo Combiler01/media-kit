@@ -28,8 +28,8 @@ void VideoOutputManager::Create(
 }
 
 void VideoOutputManager::SetSize(int64_t handle,
-                                std::optional<int64_t> width,
-                                std::optional<int64_t> height) {
+                                 std::optional<int64_t> width,
+                                 std::optional<int64_t> height) {
   std::thread([=]() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (video_outputs_.find(handle) != video_outputs_.end()) {
@@ -39,7 +39,7 @@ void VideoOutputManager::SetSize(int64_t handle,
 }
 
 void VideoOutputManager::Dispose(int64_t handle,
-                                std::function<void()> on_disposed) {
+                                 std::function<void()> on_disposed) {
   std::thread([=]() {
     std::lock_guard<std::mutex> lock(mutex_);
     video_outputs_.erase(handle);
@@ -49,5 +49,8 @@ void VideoOutputManager::Dispose(int64_t handle,
 
 VideoOutputManager::~VideoOutputManager() {
   std::lock_guard<std::mutex> lock(mutex_);
+  // |VideoOutput| destructor will do the relevant cleanup.
   video_outputs_.clear();
+  // This destructor is only called when the plugin is being destroyed i.e. the
+  // application is being closed.
 }

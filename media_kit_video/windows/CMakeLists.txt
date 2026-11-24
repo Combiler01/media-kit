@@ -18,6 +18,9 @@ set(LIBMPV_SRC "${CMAKE_BINARY_DIR}/libmpv")
 
 # Deal with MSVC incompatiblity
 add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+if(MSVC)
+  add_compile_options("/utf-8")
+endif()
 
 if(MEDIA_KIT_LIBS_AVAILABLE)
   include_directories(
@@ -45,9 +48,6 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     ${PLUGIN_NAME} PRIVATE
     FLUTTER_PLUGIN_IMPL
   )
-  if(MSVC)
-    target_compile_options(${PLUGIN_NAME} PRIVATE "/utf-8")
-  endif()
 
   target_include_directories(
     ${PLUGIN_NAME} INTERFACE
@@ -58,6 +58,8 @@ if(MEDIA_KIT_LIBS_AVAILABLE)
     ${PLUGIN_NAME} PRIVATE
     flutter
     flutter_wrapper_plugin
+    d3d11
+    dxgi
 
     # Link to libmpv.
     "${LIBMPV_SRC}/libmpv.dll.a"

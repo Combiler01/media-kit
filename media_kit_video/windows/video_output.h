@@ -16,6 +16,7 @@
 #include <atomic>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include <flutter/method_channel.h>
@@ -48,7 +49,11 @@ class VideoOutput {
     }
     // S/W
     if (pixel_buffer_ != nullptr && texture_id_) {
-      return pixel_buffer_textures_.at(texture_id_)->width;
+      std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(textures_mutex_));
+      auto it = pixel_buffer_textures_.find(texture_id_);
+      if (it != pixel_buffer_textures_.end()) {
+        return it->second->width;
+      }
     }
     return width_.value_or(1);
   }
@@ -59,7 +64,11 @@ class VideoOutput {
     }
     // S/W
     if (pixel_buffer_ != nullptr && texture_id_) {
-      return pixel_buffer_textures_.at(texture_id_)->height;
+      std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(textures_mutex_));
+      auto it = pixel_buffer_textures_.find(texture_id_);
+      if (it != pixel_buffer_textures_.end()) {
+        return it->second->height;
+      }
     }
     return height_.value_or(1);
   }
@@ -112,13 +121,13 @@ class VideoOutput {
 
   std::unique_ptr<D3D11Renderer> d3d11_renderer_ = nullptr;
   std::unordered_map<int64_t,
-                     std::unique_ptr<FlutterDesktopGpuSurfaceDescriptor>>
+                     std::shared_ptr<FlutterDesktopGpuSurfaceDescriptor>>
       textures_ = {};
 
   // S/W rendering.
 
   std::unique_ptr<uint8_t[]> pixel_buffer_ = nullptr;
-  std::unordered_map<int64_t, std::unique_ptr<FlutterDesktopPixelBuffer>>
+  std::unordered_map<int64_t, std::shared_ptr<FlutterDesktopPixelBuffer>>
       pixel_buffer_textures_ = {};
 
   // Public notifier. This is called when a new texture is registered & texture

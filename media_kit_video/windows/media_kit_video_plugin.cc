@@ -49,9 +49,9 @@ MediaKitVideoPlugin::~MediaKitVideoPlugin() {
   }
 }
 
-void MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
+bool MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
   if (!flutter_window_) {
-    return;
+    return false;
   }
 
   {
@@ -59,7 +59,10 @@ void MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
     main_thread_tasks_.push(std::move(task));
   }
 
-  ::PostMessage(flutter_window_, kMainThreadTaskMessage, 0, 0);
+  if (!::PostMessage(flutter_window_, kMainThreadTaskMessage, 0, 0)) {
+    return false;
+  }
+  return true;
 }
 
 LRESULT CALLBACK MediaKitVideoPlugin::WindowProcDelegate(HWND hwnd,
@@ -179,12 +182,14 @@ void MediaKitVideoPlugin::HandleMethodCall(
         std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
     video_output_manager_->Dispose(handle_value, [this, completion]() {
+      bool dispatched = false;
       if (flutter_window_) {
-        RunOnMainThread([completion]() {
+        dispatched = RunOnMainThread([completion]() {
           completion->Success(flutter::EncodableValue(std::monostate{}));
         });
-      } else {
-        // Window already destroyed or headless: complete immediately
+      }
+      if (!dispatched) {
+        // Window already destroyed, headless, or PostMessage failed: complete immediately
         completion->Success(flutter::EncodableValue(std::monostate{}));
       }
     });

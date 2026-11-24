@@ -178,6 +178,7 @@ class NativeVideoController extends PlatformVideoController {
       'VideoOutputManager.Create',
       {
         'handle': handle.toString(),
+        'libmpv': NativeLibrary.path,
         'configuration': {
           'width': configuration.width.toString(),
           'height': configuration.height.toString(),
