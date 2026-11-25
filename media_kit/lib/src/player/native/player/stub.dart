@@ -16,7 +16,3 @@ class NativePlayer extends PlatformPlayer {
   @visibleForTesting
   static bool test = false;
 }
-
-abstract class NativeLibrary {
-  static String get path => throw UnimplementedError();
-}

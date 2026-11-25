@@ -14,7 +14,6 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 
 class D3D11Renderer {
@@ -24,9 +23,10 @@ class D3D11Renderer {
   ~D3D11Renderer();
 
   ID3D11Device* device() const { return d3d_11_device_.Get(); }
-  ID3D11Texture2D* render_target() const {
+  // Only valid on the single render ThreadPool worker thread.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> render_target() const {
     std::lock_guard<std::mutex> lock(surfaces_mutex_);
-    return render_target_texture_.Get();
+    return render_target_texture_;
   }
   Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_texture() const {
     std::lock_guard<std::mutex> lock(surfaces_mutex_);

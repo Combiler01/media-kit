@@ -50,7 +50,6 @@ class VideoOutputManager {
   ~VideoOutputManager();
 
  private:
-  std::mutex mutex_ = std::mutex();
   // All the operations involving Direct3D 11 or libmpv must be performed on
   // the same single thread to prevent any race conditions or invalid D3D11
   // context usage. Not doing so results in access violations & crashes.
@@ -81,9 +80,15 @@ class VideoOutputManager {
   // Creating a |ThreadPool| with maximum number of worker threads as 1, ensures
   // that all the posted tasks are performed on a single thread orderly. This
   // also makes usage of any |std::mutex| unnecessary (for the good).
-  std::unique_ptr<ThreadPool> thread_pool_ = std::make_unique<ThreadPool>(1);
-  flutter::PluginRegistrarWindows* registrar_ = nullptr;
-  std::unordered_map<int64_t, std::unique_ptr<VideoOutput>> video_outputs_ = {};
+  struct State {
+    std::mutex mutex;
+    bool alive = true;
+    std::unique_ptr<ThreadPool> thread_pool = std::make_unique<ThreadPool>(1);
+    flutter::PluginRegistrarWindows* registrar = nullptr;
+    std::unordered_map<int64_t, std::unique_ptr<VideoOutput>> video_outputs;
+  };
+
+  std::shared_ptr<State> state_ = std::make_shared<State>();
 };
 
 #endif  // VIDEO_OUTPUT_MANAGER_H_

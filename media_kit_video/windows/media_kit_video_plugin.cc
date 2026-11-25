@@ -25,43 +25,65 @@ MediaKitVideoPlugin::MediaKitVideoPlugin(
     : registrar_(registrar),
       video_output_manager_(std::make_unique<VideoOutputManager>(registrar)) {
   instance_ = this;
-  flutter_window_ =
-      ::GetAncestor(registrar->GetView()->GetNativeWindow(), GA_ROOT);
-  original_window_proc_ = reinterpret_cast<WNDPROC>(
-      ::SetWindowLongPtr(flutter_window_, GWLP_WNDPROC,
-                         reinterpret_cast<LONG_PTR>(WindowProcDelegate)));
+  if (auto* view = registrar->GetView()) {
+    state_->flutter_window =
+        ::GetAncestor(view->GetNativeWindow(), GA_ROOT);
+    if (state_->flutter_window) {
+      state_->original_window_proc = reinterpret_cast<WNDPROC>(
+          ::SetWindowLongPtr(state_->flutter_window, GWLP_WNDPROC,
+                             reinterpret_cast<LONG_PTR>(WindowProcDelegate)));
+    }
+  }
 
-  channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-      registrar->messenger(), "com.alexmercerind/media_kit_video",
-      &flutter::StandardMethodCodec::GetInstance());
-  channel_->SetMethodCallHandler([&](const auto& call, auto result) {
+  state_->channel =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          registrar->messenger(), "com.alexmercerind/media_kit_video",
+          &flutter::StandardMethodCodec::GetInstance());
+  state_->channel->SetMethodCallHandler([this](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
 }
 
 MediaKitVideoPlugin::~MediaKitVideoPlugin() {
-  if (flutter_window_ && original_window_proc_) {
-    ::SetWindowLongPtr(flutter_window_, GWLP_WNDPROC,
-                       reinterpret_cast<LONG_PTR>(original_window_proc_));
+  HWND window = nullptr;
+  WNDPROC orig_proc = nullptr;
+  std::queue<std::function<void()>> pending_tasks;
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->alive = false;
+    window = state_->flutter_window;
+    orig_proc = state_->original_window_proc;
+    state_->flutter_window = nullptr;
+    state_->original_window_proc = nullptr;
+    state_->main_thread_tasks.swap(pending_tasks);
+    state_->channel.reset();
+  }
+  if (window && orig_proc) {
+    ::SetWindowLongPtr(window, GWLP_WNDPROC,
+                       reinterpret_cast<LONG_PTR>(orig_proc));
   }
   if (instance_ == this) {
     instance_ = nullptr;
   }
 }
 
-bool MediaKitVideoPlugin::RunOnMainThread(std::function<void()> task) {
-  if (!flutter_window_) {
+bool MediaKitVideoPlugin::RunOnMainThread(
+    const std::shared_ptr<PluginState>& state,
+    std::function<void()> task) {
+  if (!state) {
     return false;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(main_thread_tasks_mutex_);
-    main_thread_tasks_.push(std::move(task));
-  }
-
-  if (!::PostMessage(flutter_window_, kMainThreadTaskMessage, 0, 0)) {
+  std::lock_guard<std::mutex> lock(state->mutex);
+  if (!state->alive || !state->flutter_window ||
+      !::IsWindow(state->flutter_window)) {
     return false;
   }
+
+  if (!::PostMessage(state->flutter_window, kMainThreadTaskMessage, 0, 0)) {
+    return false;
+  }
+  state->main_thread_tasks.push(std::move(task));
   return true;
 }
 
@@ -74,9 +96,9 @@ LRESULT CALLBACK MediaKitVideoPlugin::WindowProcDelegate(HWND hwnd,
     return 0;
   }
 
-  if (instance_ && instance_->original_window_proc_) {
-    return ::CallWindowProc(instance_->original_window_proc_, hwnd, message,
-                            wParam, lParam);
+  if (instance_ && instance_->state_->original_window_proc) {
+    return ::CallWindowProc(instance_->state_->original_window_proc, hwnd,
+                            message, wParam, lParam);
   }
 
   return ::DefWindowProc(hwnd, message, wParam, lParam);
@@ -86,8 +108,8 @@ void MediaKitVideoPlugin::ProcessMainThreadTasks() {
   std::queue<std::function<void()>> tasks_to_execute;
 
   {
-    std::lock_guard<std::mutex> lock(main_thread_tasks_mutex_);
-    tasks_to_execute.swap(main_thread_tasks_);
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    tasks_to_execute.swap(state_->main_thread_tasks);
   }
 
   while (!tasks_to_execute.empty()) {
@@ -133,9 +155,13 @@ void MediaKitVideoPlugin::HandleMethodCall(
 
     video_output_manager_->Create(
         handle_value, configuration_value,
-        [this, handle = handle_value](auto id, auto width, auto height) {
-          RunOnMainThread([=]() {
-            channel_->InvokeMethod(
+        [state = state_, handle = handle_value](auto id, auto width,
+                                                auto height) {
+          RunOnMainThread(state, [state, handle, id, width, height]() {
+            if (!state->alive || !state->channel) {
+              return;
+            }
+            state->channel->InvokeMethod(
                 "VideoOutput.Resize",
                 std::make_unique<flutter::EncodableValue>(flutter::EncodableMap{
                     {
@@ -181,18 +207,22 @@ void MediaKitVideoPlugin::HandleMethodCall(
     auto completion =
         std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
-    video_output_manager_->Dispose(handle_value, [this, completion]() {
-      bool dispatched = false;
-      if (flutter_window_) {
-        dispatched = RunOnMainThread([completion]() {
-          completion->Success(flutter::EncodableValue(std::monostate{}));
+    video_output_manager_->Dispose(
+        handle_value, [state = state_, completion]() {
+          bool dispatched = RunOnMainThread(state, [state, completion]() {
+            if (!state->alive) {
+              return;
+            }
+            completion->Success(flutter::EncodableValue(std::monostate{}));
+          });
+          if (!dispatched) {
+            // Headless (no HWND): complete immediately if the plugin is still alive.
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (state->alive && !state->flutter_window) {
+              completion->Success(flutter::EncodableValue(std::monostate{}));
+            }
+          }
         });
-      }
-      if (!dispatched) {
-        // Window already destroyed, headless, or PostMessage failed: complete immediately
-        completion->Success(flutter::EncodableValue(std::monostate{}));
-      }
-    });
   } else if (method_call.method_name().compare("VideoOutputManager.SetSize") ==
              0) {
     auto arguments = std::get<flutter::EncodableMap>(*method_call.arguments());

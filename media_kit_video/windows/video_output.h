@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
@@ -49,9 +50,9 @@ class VideoOutput {
     }
     // S/W
     if (pixel_buffer_ != nullptr && texture_id_) {
-      std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(textures_mutex_));
-      auto it = pixel_buffer_textures_.find(texture_id_);
-      if (it != pixel_buffer_textures_.end()) {
+      std::lock_guard<std::mutex> lock(texture_state_->mutex);
+      auto it = texture_state_->pixel_buffer_textures.find(texture_id_);
+      if (it != texture_state_->pixel_buffer_textures.end()) {
         return it->second->width;
       }
     }
@@ -64,9 +65,9 @@ class VideoOutput {
     }
     // S/W
     if (pixel_buffer_ != nullptr && texture_id_) {
-      std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(textures_mutex_));
-      auto it = pixel_buffer_textures_.find(texture_id_);
-      if (it != pixel_buffer_textures_.end()) {
+      std::lock_guard<std::mutex> lock(texture_state_->mutex);
+      auto it = texture_state_->pixel_buffer_textures.find(texture_id_);
+      if (it != texture_state_->pixel_buffer_textures.end()) {
         return it->second->height;
       }
     }
@@ -90,13 +91,29 @@ class VideoOutput {
 
   void Render();
 
+  void SkipFrame();
+
   void CheckAndResize();
 
   void Resize(int64_t required_width, int64_t required_height);
 
+  void GetVideoDimensions(int64_t& out_width, int64_t& out_height);
+
   int64_t GetVideoWidth();
 
   int64_t GetVideoHeight();
+
+  struct TextureRegistryState {
+    std::mutex mutex;
+    bool destroyed = false;
+    std::unordered_map<int64_t, std::unique_ptr<flutter::TextureVariant>>
+        texture_variants;
+    std::unordered_map<int64_t,
+                       std::shared_ptr<FlutterDesktopGpuSurfaceDescriptor>>
+        textures;
+    std::unordered_map<int64_t, std::shared_ptr<FlutterDesktopPixelBuffer>>
+        pixel_buffer_textures;
+  };
 
   std::optional<int64_t> height_ = std::nullopt;
   std::optional<int64_t> width_ = std::nullopt;
@@ -109,26 +126,16 @@ class VideoOutput {
   ThreadPool* thread_pool_ref_ = nullptr;
   // Stop queued callbacks before draining and freeing their borrowed resources.
   std::atomic<bool> destroyed_{false};
-  std::shared_ptr<std::atomic<bool>> alive_ =
-      std::make_shared<std::atomic<bool>>(true);
-
-  std::mutex textures_mutex_ = std::mutex();
-
-  std::unordered_map<int64_t, std::unique_ptr<flutter::TextureVariant>>
-      texture_variants_ = {};
+  std::shared_ptr<TextureRegistryState> texture_state_ =
+      std::make_shared<TextureRegistryState>();
 
   // H/W rendering.
 
   std::unique_ptr<D3D11Renderer> d3d11_renderer_ = nullptr;
-  std::unordered_map<int64_t,
-                     std::shared_ptr<FlutterDesktopGpuSurfaceDescriptor>>
-      textures_ = {};
 
   // S/W rendering.
 
   std::unique_ptr<uint8_t[]> pixel_buffer_ = nullptr;
-  std::unordered_map<int64_t, std::shared_ptr<FlutterDesktopPixelBuffer>>
-      pixel_buffer_textures_ = {};
 
   // Public notifier. This is called when a new texture is registered & texture
   // ID is changed. Only happens when video output resolution changes.

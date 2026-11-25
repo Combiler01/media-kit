@@ -1,9 +1,8 @@
 ## 2.1.0
 
 - feat(windows): render through native Direct3D 11 render API (replace ANGLE)
-- feat(windows): zero-copy Direct3D 11 texture sharing with Flutter engine
+- feat(windows): Direct3D 11 texture sharing with Flutter engine (avoiding CPU readback and ANGLE translation)
 - fix(windows): resolve texture synchronization and race conditions during resize
-- fix(windows): pass resolved libmpv path to native plugin
 - fix(windows): prevent method channel deadlock in VideoOutputManager.Dispose
 
 ## 2.0.1

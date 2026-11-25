@@ -280,7 +280,6 @@ class _SeekBarState extends State<SeekBar> {
 Future<void> showFilePicker(BuildContext context, Player player) async {
   final files = await FilePicker.pickFiles(
     type: FileType.any,
-    withData: kIsWeb,
   );
   if (files.isNotEmpty) {
     final file = files.first;
