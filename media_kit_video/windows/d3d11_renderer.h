@@ -14,8 +14,9 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 #include <cstdint>
-#include <mutex>
 
+// Manages a Direct3D 11 device and double-buffered render/shared textures.
+// All methods must be called from the single render ThreadPool worker thread.
 class D3D11Renderer {
  public:
   D3D11Renderer(int32_t width, int32_t height,
@@ -23,41 +24,26 @@ class D3D11Renderer {
   ~D3D11Renderer();
 
   ID3D11Device* device() const { return d3d_11_device_.Get(); }
-  // Only valid on the single render ThreadPool worker thread.
   Microsoft::WRL::ComPtr<ID3D11Texture2D> render_target() const {
-    std::lock_guard<std::mutex> lock(surfaces_mutex_);
     return render_target_texture_;
   }
   Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_texture() const {
-    std::lock_guard<std::mutex> lock(surfaces_mutex_);
     return shared_texture_;
   }
-  HANDLE shared_handle() const {
-    std::lock_guard<std::mutex> lock(surfaces_mutex_);
-    return shared_handle_;
-  }
-  int32_t width() const {
-    std::lock_guard<std::mutex> lock(surfaces_mutex_);
-    return width_;
-  }
-  int32_t height() const {
-    std::lock_guard<std::mutex> lock(surfaces_mutex_);
-    return height_;
-  }
+  HANDLE shared_handle() const { return shared_handle_; }
+  int32_t width() const { return width_; }
+  int32_t height() const { return height_; }
 
   bool SetSize(int32_t width, int32_t height);
-  bool ProducerAcquire();
-  void ProducerCommit();
+  void Commit();
 
  private:
   bool CreateD3D11Device(IDXGIAdapter* flutter_adapter);
-  bool CreateSurfacesLocked();
-  void ReleaseSurfacesLocked();
+  bool CreateSurfaces();
+  void ReleaseSurfaces();
 
   int32_t width_ = 1;
   int32_t height_ = 1;
-
-  mutable std::mutex surfaces_mutex_;
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_11_device_;
   Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d_11_device_context_;

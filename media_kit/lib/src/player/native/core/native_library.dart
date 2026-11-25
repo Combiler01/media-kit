@@ -51,8 +51,6 @@ abstract class NativeLibrary {
         'libmpv-2.dll',
         'mpv-2.dll',
         'mpv-1.dll',
-        'libmpv.dll',
-        'mpv.dll',
       ],
       'linux': [
         'libmpv.so',

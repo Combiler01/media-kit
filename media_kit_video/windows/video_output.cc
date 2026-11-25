@@ -225,29 +225,20 @@ void VideoOutput::Render() {
     SkipFrame();
     return;
   }
-  // H/W
+
+  bool rendered = false;
   if (d3d11_renderer_ != nullptr) {
-    auto rt = d3d11_renderer_->render_target();
-    if (d3d11_renderer_->ProducerAcquire() && rt != nullptr) {
+    if (auto rt = d3d11_renderer_->render_target()) {
       mpv_d3d11_fbo fbo = {rt.Get()};
       mpv_render_param params[]{
           {MPV_RENDER_PARAM_D3D11_FBO, &fbo},
           {MPV_RENDER_PARAM_INVALID, nullptr},
       };
       mpv_render_context_render(render_context_, params);
-      d3d11_renderer_->ProducerCommit();
-      try {
-        // Notify Flutter that a new frame is available.
-        registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-      } catch (...) {
-        // Prevent any redundant exceptions if the texture is unregistered etc.
-      }
-    } else {
-      SkipFrame();
+      d3d11_renderer_->Commit();
+      rendered = true;
     }
-  }
-  // S/W
-  if (pixel_buffer_ != nullptr) {
+  } else if (pixel_buffer_ != nullptr) {
     int32_t width = 0;
     int32_t height = 0;
     {
@@ -270,15 +261,19 @@ void VideoOutput::Render() {
           {MPV_RENDER_PARAM_INVALID, nullptr},
       };
       mpv_render_context_render(render_context_, params);
-      try {
-        // Notify Flutter that a new frame is available.
-        registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
-      } catch (...) {
-        // Prevent any redundant exceptions if the texture is unregistered etc.
-      }
-    } else {
-      SkipFrame();
+      rendered = true;
     }
+  }
+
+  if (rendered) {
+    try {
+      // Notify Flutter that a new frame is available.
+      registrar_->texture_registrar()->MarkTextureFrameAvailable(texture_id_);
+    } catch (...) {
+      // Prevent any redundant exceptions if the texture is unregistered etc.
+    }
+  } else {
+    SkipFrame();
   }
 }
 
@@ -335,7 +330,15 @@ void VideoOutput::CheckAndResize() {
     return;
   }
   // Check if a new texture with different dimensions is needed.
-  auto required_width = GetVideoWidth(), required_height = GetVideoHeight();
+  int64_t required_width = 0, required_height = 0;
+  if (width_ && height_) {
+    required_width = width_.value();
+    required_height = height_.value();
+  } else {
+    GetVideoDimensions(required_width, required_height);
+    if (width_) required_width = width_.value();
+    if (height_) required_height = height_.value();
+  }
   if (required_width < 1 || required_height < 1) {
     // Invalid.
     return;
@@ -344,8 +347,7 @@ void VideoOutput::CheckAndResize() {
   if (d3d11_renderer_ != nullptr) {
     current_width = d3d11_renderer_->width();
     current_height = d3d11_renderer_->height();
-  }
-  if (pixel_buffer_ != nullptr) {
+  } else if (pixel_buffer_ != nullptr) {
     std::lock_guard<std::mutex> lock(texture_state_->mutex);
     auto it = texture_state_->pixel_buffer_textures.find(texture_id_);
     if (texture_id_ && it != texture_state_->pixel_buffer_textures.end() &&
@@ -387,9 +389,12 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
         });
     texture_id_ = 0;
   }
-  // H/W
+
+  std::unique_ptr<flutter::TextureVariant> texture_variant;
+  std::shared_ptr<FlutterDesktopGpuSurfaceDescriptor> gpu_texture;
+  std::shared_ptr<FlutterDesktopPixelBuffer> sw_texture;
+
   if (d3d11_renderer_ != nullptr) {
-    // Resize the D3D11 textures.
     if (!d3d11_renderer_->SetSize(static_cast<int32_t>(required_width),
                                   static_cast<int32_t>(required_height))) {
       std::cout << "media_kit: VideoOutput: D3D11Renderer::SetSize failed."
@@ -397,66 +402,61 @@ void VideoOutput::Resize(int64_t required_width, int64_t required_height) {
       return;
     }
 
-    auto texture = std::make_shared<FlutterDesktopGpuSurfaceDescriptor>();
-    texture->struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
-    texture->handle = d3d11_renderer_->shared_handle();
-    texture->width = texture->visible_width = d3d11_renderer_->width();
-    texture->height = texture->visible_height = d3d11_renderer_->height();
-    texture->release_context = nullptr;
-    texture->release_callback = [](void*) {};
-    texture->format = kFlutterDesktopPixelFormatBGRA8888;
+    gpu_texture = std::make_shared<FlutterDesktopGpuSurfaceDescriptor>();
+    gpu_texture->struct_size = sizeof(FlutterDesktopGpuSurfaceDescriptor);
+    gpu_texture->handle = d3d11_renderer_->shared_handle();
+    gpu_texture->width = gpu_texture->visible_width = d3d11_renderer_->width();
+    gpu_texture->height = gpu_texture->visible_height =
+        d3d11_renderer_->height();
+    gpu_texture->release_context = nullptr;
+    gpu_texture->release_callback = [](void*) {};
+    gpu_texture->format = kFlutterDesktopPixelFormatBGRA8888;
 
-    auto texture_variant = std::make_unique<flutter::TextureVariant>(
+    texture_variant = std::make_unique<flutter::TextureVariant>(
         flutter::GpuSurfaceTexture(
             kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle,
-            [texture](size_t width, size_t height) -> const FlutterDesktopGpuSurfaceDescriptor* {
-              return texture.get();
+            [gpu_texture](size_t width, size_t height)
+                -> const FlutterDesktopGpuSurfaceDescriptor* {
+              return gpu_texture.get();
             }));
+  } else if (pixel_buffer_ != nullptr) {
+    sw_texture = std::make_shared<FlutterDesktopPixelBuffer>();
+    sw_texture->buffer = pixel_buffer_.get();
+    sw_texture->width = required_width;
+    sw_texture->height = required_height;
+    sw_texture->release_context = nullptr;
+    sw_texture->release_callback = [](void*) {};
 
-    // ACQUIRE LOCK BEFORE REGISTRATION
-    {
-      std::lock_guard<std::mutex> lock(texture_state_->mutex);
-      texture_id_ =
-          registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-
-      texture_state_->textures.emplace(texture_id_, std::move(texture));
-      texture_state_->texture_variants.emplace(texture_id_,
-                                               std::move(texture_variant));
-    }
-
-    // Notify public texture update callback outside the lock.
-    texture_update_callback_(texture_id_, required_width, required_height);
-  }
-  // S/W
-  if (pixel_buffer_ != nullptr) {
-    auto pixel_buffer_texture = std::make_shared<FlutterDesktopPixelBuffer>();
-    pixel_buffer_texture->buffer = pixel_buffer_.get();
-    pixel_buffer_texture->width = required_width;
-    pixel_buffer_texture->height = required_height;
-    pixel_buffer_texture->release_context = nullptr;
-    pixel_buffer_texture->release_callback = [](void*) {};
-
-    auto texture_variant = std::make_unique<flutter::TextureVariant>(
+    texture_variant = std::make_unique<flutter::TextureVariant>(
         flutter::PixelBufferTexture(
-            [pixel_buffer_texture](size_t width, size_t height) -> const FlutterDesktopPixelBuffer* {
-              return pixel_buffer_texture.get();
+            [sw_texture](size_t width, size_t height)
+                -> const FlutterDesktopPixelBuffer* {
+              return sw_texture.get();
             }));
-
-    // ACQUIRE LOCK BEFORE REGISTRATION
-    {
-      std::lock_guard<std::mutex> lock(texture_state_->mutex);
-      texture_id_ =
-          registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
-
-      texture_state_->pixel_buffer_textures.emplace(
-          texture_id_, std::move(pixel_buffer_texture));
-      texture_state_->texture_variants.emplace(texture_id_,
-                                               std::move(texture_variant));
-    }
-
-    // Notify public texture update callback outside the lock.
-    texture_update_callback_(texture_id_, required_width, required_height);
   }
+
+  if (!texture_variant) {
+    return;
+  }
+
+  // Acquire lock before registration so Flutter callbacks see populated maps.
+  {
+    std::lock_guard<std::mutex> lock(texture_state_->mutex);
+    texture_id_ =
+        registrar_->texture_registrar()->RegisterTexture(texture_variant.get());
+    if (gpu_texture) {
+      texture_state_->textures.emplace(texture_id_, std::move(gpu_texture));
+    }
+    if (sw_texture) {
+      texture_state_->pixel_buffer_textures.emplace(texture_id_,
+                                                    std::move(sw_texture));
+    }
+    texture_state_->texture_variants.emplace(texture_id_,
+                                             std::move(texture_variant));
+  }
+
+  // Notify public texture update callback outside the lock.
+  texture_update_callback_(texture_id_, required_width, required_height);
 }
 
 void VideoOutput::GetVideoDimensions(int64_t& out_width, int64_t& out_height) {

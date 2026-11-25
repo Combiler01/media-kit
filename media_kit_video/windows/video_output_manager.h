@@ -13,7 +13,6 @@
 
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <unordered_map>
 
@@ -80,15 +79,12 @@ class VideoOutputManager {
   // Creating a |ThreadPool| with maximum number of worker threads as 1, ensures
   // that all the posted tasks are performed on a single thread orderly. This
   // also makes usage of any |std::mutex| unnecessary (for the good).
-  struct State {
-    std::mutex mutex;
-    bool alive = true;
-    std::unique_ptr<ThreadPool> thread_pool = std::make_unique<ThreadPool>(1);
-    flutter::PluginRegistrarWindows* registrar = nullptr;
-    std::unordered_map<int64_t, std::unique_ptr<VideoOutput>> video_outputs;
-  };
-
-  std::shared_ptr<State> state_ = std::make_shared<State>();
+  std::unique_ptr<ThreadPool> thread_pool_ = std::make_unique<ThreadPool>(1);
+  flutter::PluginRegistrarWindows* registrar_ = nullptr;
+  std::unordered_map<int64_t, std::unique_ptr<VideoOutput>> video_outputs_ = {};
+  // Declared last so pending Create/SetSize/Dispose tasks drain and join before
+  // |video_outputs_| and |thread_pool_| are destroyed.
+  std::unique_ptr<ThreadPool> command_pool_ = std::make_unique<ThreadPool>(1);
 };
 
 #endif  // VIDEO_OUTPUT_MANAGER_H_

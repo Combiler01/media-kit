@@ -38,9 +38,7 @@ class MediaKitVideoPlugin : public flutter::Plugin {
     std::mutex mutex;
     bool alive = true;
     HWND flutter_window = nullptr;
-    WNDPROC original_window_proc = nullptr;
     std::queue<std::function<void()>> main_thread_tasks;
-    std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel;
   };
 
   void HandleMethodCall(
@@ -53,8 +51,11 @@ class MediaKitVideoPlugin : public flutter::Plugin {
   void ProcessMainThreadTasks();
   
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
-  std::shared_ptr<PluginState> state_ = std::make_shared<PluginState>();
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_ =
+      nullptr;
   std::unique_ptr<VideoOutputManager> video_output_manager_ = nullptr;
+  WNDPROC original_window_proc_ = nullptr;
+  std::shared_ptr<PluginState> state_ = std::make_shared<PluginState>();
   static MediaKitVideoPlugin* instance_;
 };
 
