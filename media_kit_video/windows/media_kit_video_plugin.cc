@@ -211,9 +211,9 @@ void MediaKitVideoPlugin::HandleMethodCall(
             completion->Success(flutter::EncodableValue(std::monostate{}));
           });
           if (!dispatched) {
-            // Headless (no HWND): complete immediately if the plugin is still alive.
+            // Nothing got queued (no HWND or window already destroyed): reply here so Dart does not wait forever.
             std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->alive && !state->flutter_window) {
+            if (state->alive) {
               completion->Success(flutter::EncodableValue(std::monostate{}));
             }
           }

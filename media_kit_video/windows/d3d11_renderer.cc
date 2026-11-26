@@ -12,9 +12,6 @@
 #include <iterator>
 #include <stdexcept>
 
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3d11.lib")
-
 D3D11Renderer::D3D11Renderer(int32_t width, int32_t height,
                              IDXGIAdapter* flutter_adapter)
     : width_(width > 0 ? width : 1), height_(height > 0 ? height : 1) {

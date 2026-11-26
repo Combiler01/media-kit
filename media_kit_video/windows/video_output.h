@@ -42,38 +42,6 @@ typedef struct _VideoOutputConfiguration {
 
 class VideoOutput {
  public:
-  int64_t texture_id() const { return texture_id_; }
-  int64_t width() const {
-    // H/W
-    if (d3d11_renderer_ != nullptr && texture_id_) {
-      return d3d11_renderer_->width();
-    }
-    // S/W
-    if (pixel_buffer_ != nullptr && texture_id_) {
-      std::lock_guard<std::mutex> lock(texture_state_->mutex);
-      auto it = texture_state_->pixel_buffer_textures.find(texture_id_);
-      if (it != texture_state_->pixel_buffer_textures.end()) {
-        return it->second->width;
-      }
-    }
-    return width_.value_or(1);
-  }
-  int64_t height() const {
-    // H/W
-    if (d3d11_renderer_ != nullptr && texture_id_) {
-      return d3d11_renderer_->height();
-    }
-    // S/W
-    if (pixel_buffer_ != nullptr && texture_id_) {
-      std::lock_guard<std::mutex> lock(texture_state_->mutex);
-      auto it = texture_state_->pixel_buffer_textures.find(texture_id_);
-      if (it != texture_state_->pixel_buffer_textures.end()) {
-        return it->second->height;
-      }
-    }
-    return height_.value_or(1);
-  }
-
   VideoOutput(int64_t handle,
               VideoOutputConfiguration configuration,
               flutter::PluginRegistrarWindows* registrar,
